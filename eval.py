@@ -186,7 +186,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval_set_cost_cl', type=float, default=1.0)
     parser.add_argument('--eval_disable_captioning', action='store_true', default=False)
     parser.add_argument('--eval_disable_contrastive', action='store_true', default=False)
-    parser.add_argument('--eval_gt_file_for_grounding', type=str, default='data/anet/captiondata/grounding/val1_for_grounding.json')
+    parser.add_argument('--eval_gt_file_for_grounding', type=str, default='data/yc2/captiondata/grounding/yc2_val_for_grounding.json')
     parser.add_argument('--eval_for_multi_anno', action='store_true', default=False)
     parser.add_argument('--eval_enable_zeroshot_tal', action='store_true', default=False)
     parser.add_argument('--eval_prompt', type=str, default='a video of')
@@ -232,40 +232,19 @@ if __name__ == '__main__':
     opt.cap_num_feature_levels=5
     
     #debug
-    # opt.target_domain='anet'
-    opt.target_domain='yc2'
-    # opt.bank_type=['anet']
-    opt.bank_type=['yc2']
-    opt.window_size=50
-    # opt.window_size=20
-    opt.soft_k=80
-    # opt.soft_k=100
-    opt.text_crossAttn=True
-    opt.text_crossAttn_loc='after'
-    opt.sim_match='window_cos'
-    opt.ret_text='token'
-    opt.down_proj='deep'
-    opt.eval_folder= 'yc2_clip_cm2' 
-    # opt.eval_folder= 'anet_clip_cm2' 
-    opt.exp_name = 'best' 
-    opt.eval_transformer_input_type ='queries' 
- 
+    opt.text_crossAttn=True 
     opt.bank_path='data/bank'
-    if opt.eval_folder=='yc2_clip_cm2':
+
+    if opt.target_domain == 'yc2':
         opt.test_video_feature_folder='data/yc2/features/clipvitl14.pth/'
         opt.eval_caption_file='data/yc2/captiondata/val.json'
         opt.eval_gt_file_for_caption=['data/yc2/captiondata/val.json']
-        opt.target_domain='yc2'
-    elif opt.eval_folder=='anet_clip_cm2':
+        
+    elif opt.target_domain == 'anet':
         opt.test_video_feature_folder='data/anet/features/clipvitl14.pth/'
         opt.eval_caption_file='data/anet/captiondata/val_1.json'
         opt.eval_gt_file_for_caption=['data/anet/captiondata/val_1.json','data/anet/captiondata/val_2.json']
-        opt.target_domain='anet'
-    
-   
-   
-    if not opt.text_crossAttn:
-        opt.cap_num_feature_levels=4
+
     if opt.decoder_query_ablation:
         opt.num_queries=opt.decoder_query_num
     if opt.combined_encoder:

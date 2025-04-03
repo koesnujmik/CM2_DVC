@@ -1,4 +1,4 @@
-id: yc2_clip_esc
+id: yc2_test
 
 visual_feature_type: ['clip']
 visual_feature_folder: ['data/yc2/features/clipvitl14.pth']
