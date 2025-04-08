@@ -48,11 +48,11 @@ ec_alpha: 1.0
 #cost_gamma: 1
 #focal_alpha: 0.5
 #focal_gamma: 1
-caption_loss_coef: 1 # 논문 속 L cap 앞에 곱해지는 lambda cap
-giou_loss_coef: 2 # 논문 속 L loc 앞에 곱해지는 lambda loc
+caption_loss_coef: 2
+giou_loss_coef: 4
 bbox_loss_coef: 0
-cls_loss_coef: 1 # 논문에서는 계수가 붙지 않음. 그래서 1로 계산
-count_loss_coef: 1 # 논문 속 L count 앞에 곱해지는 lambda count
+cls_loss_coef: 2
+count_loss_coef: 0.5
 max_eseq_length: 20
 lloss_cross_entropy: 0
 lloss_focal_loss: 0
@@ -64,7 +64,7 @@ lloss_gau_mask: 1
 with_box_refine: 1
 fix_xcw: 1
 set_cost_caption: 0
-set_cost_giou: 2 # 논문 속 헝가리안 매칭 코스트에서 L loc 에 곱해지는 alpha
+set_cost_giou: 4
 set_cost_bbox: 0
-set_cost_class: 1 # 논문에서는 계수가 붙지 않음. 그래서 1로 계산
+set_cost_class: 2
 set_cost_cl: 2.0
