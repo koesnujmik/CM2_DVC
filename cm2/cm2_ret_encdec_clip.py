@@ -18,7 +18,7 @@ import clip
 from misc.detr_utils import box_ops
 from misc.detr_utils.misc import (inverse_sigmoid)
 
-from .matcher import build_matcher_cl
+from .matcher import build_matcher_cl, HungarianMatcher_cl
 
 from .deformable_transformer import build_deforamble_transformer
 from cm2.CaptioningHead import build_captioner
@@ -697,8 +697,7 @@ class CM2(nn.Module):
         num_pred = hs.shape[0]
         for l_id in range(num_pred):
             hs_lid = hs[l_id]
-            reference = init_reference if l_id == 0 else inter_references[
-                l_id - 1]  # [decoder_layer, batch, query_num, ...]
+            reference = init_reference if l_id == 0 else inter_references[l_id - 1]  # [decoder_layer, batch, query_num, ...]
             outputs_class = self.class_head[l_id](hs_lid)  # [bs, num_query, N_class]
             outputs_count = self.predict_event_num(self.count_head[l_id], hs_lid)
             tmp = self.bbox_head[l_id](hs_lid)  # [bs, num_query, 4]
@@ -759,16 +758,16 @@ class CM2(nn.Module):
             for l_id in range(hs.shape[0]):
                 hs_lid = hs[l_id]
                 reference = init_reference if l_id == 0 else inter_references[l_id - 1]
-                indices = last_indices[0] if l_id == hs.shape[0] - 1 else aux_indices[l_id][0]
+                indices_l = last_indices[0][0] if l_id == hs.shape[0] - 1 else aux_indices[0][l_id][0]
                 cap_loss, cap_probs, seq = self.caption_prediction(self.caption_head[l_id], dt, hs_lid, reference,
-                                                                   others, self.opt.caption_decoder_type, indices)
+                                                                   others, self.opt.caption_decoder_type, indices_l)
 
                 l_dict = {'loss_caption': cap_loss}
                 if self.enable_contrastive:
                     contrastive_loss = contrastive_criterion(
                         text_embed = others['text_embed'][l_id],
                         event_embed = others['event_embed'][l_id],
-                        matching_indices = indices,
+                        matching_indices = indices_l,
                         bg_embed = self.background_embed,
                     )
 
@@ -779,20 +778,20 @@ class CM2(nn.Module):
 
             out.update({'caption_probs': cap_probs, 'seq': seq})
         else:
-            loss, last_indices = criterion(out, dt['video_target'])
+            loss, indices_l, indices_s = criterion(out, dt['video_target'])
 
             l_id = hs.shape[0] - 1
             reference = inter_references[l_id - 1]  # [decoder_layer, batch, query_num, ...]
             hs_lid = hs[l_id]
-            indices = last_indices[0]
+            indices_l = last_indices[0][0]
             cap_loss, cap_probs, seq = self.caption_prediction(self.caption_head[l_id], dt, hs_lid, reference,
-                                                               others, self.opt.caption_decoder_type, indices)
+                                                               others, self.opt.caption_decoder_type, indices_l)
             l_dict = {'loss_caption': cap_loss}
             if self.enable_contrastive:
                 contrastive_loss = contrastive_criterion(
                     text_embed = others['text_embed'][l_id],
                     event_embed = others['event_embed'][l_id],
-                    matching_indices = indices
+                    matching_indices = indices_l
                 )
 
                 l_dict.update({'contrastive_loss': contrastive_loss})
@@ -1190,7 +1189,29 @@ def build(args):
         opt=args
     )
 
-    matcher = build_matcher_cl(args)
+    # matcher = build_matcher_cl(args)
+    # 위치 매칭용 매처: gIoU, bbox, 클래스 비용만 사용
+    matcher_loc = HungarianMatcher_cl(
+        cost_class = args.set_cost_class,   # 예: 1.0
+        cost_bbox  = args.set_cost_bbox,    # 예: 1.0
+        cost_giou  = args.set_cost_giou,    # 예: 1.0
+        cost_alpha = args.cost_alpha,       # focal α (classification)
+        cost_gamma = args.cost_gamma,       # focal γ (classification)
+        cost_cl    = 0.0,                   # semantic cost 끔
+        opt        = args,
+    )
+
+    # 의미 매칭용 매처: 오직 semantic(contrastive/cosine) 비용만 사용
+    matcher_sem = HungarianMatcher_cl(
+        cost_class = 0.0,                   # classification cost 끔
+        cost_bbox  = 0.0,                   # bbox L1 cost 끔
+        cost_giou  = 0.0,                   # gIoU cost 끔
+        cost_alpha = args.cost_alpha,       # (unused)
+        cost_gamma = args.cost_gamma,       # (unused)
+        cost_cl    = vars(args).get('set_cost_cl', 1.), # semantic cost만 켬
+        opt        = args,
+    )
+
     weight_dict = {'loss_ce': args.cls_loss_coef,
                    'loss_bbox': args.bbox_loss_coef,
                    'loss_giou': args.giou_loss_coef,
@@ -1206,7 +1227,7 @@ def build(args):
         weight_dict.update(aux_weight_dict)
     losses = ['labels', 'boxes', 'cardinality']
 
-    criterion = SetCriterion_cl(args.num_classes, matcher, weight_dict, losses, focal_alpha=args.focal_alpha,
+    criterion = SetCriterion_cl(args.num_classes, matcher_loc, matcher_sem, weight_dict, losses, focal_alpha=args.focal_alpha,
                              focal_gamma=args.focal_gamma, opt=args)
     contrastive_criterion = ContrastiveCriterion(temperature=args.contrastive_loss_temperature,
                                                  enable_cross_video_cl=args.enable_cross_video_cl,
