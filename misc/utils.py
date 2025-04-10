@@ -102,34 +102,50 @@ def print_opt(opt, model, logger):
     logger.info(model)
 
 
-def build_floder(opt):
+def build_folder(opt, overwrite=False):
+    """
+    폴더 생성 유틸리티.
+    - opt.start_from 이 지정된 경우: 해당 폴더가 있어야 하고, 그 폴더를 반환.
+    - 그렇지 않은 경우:
+        * overwrite=True: 기존 폴더가 있으면 삭제 후 재생성.
+        * overwrite=False: 이미 존재하면 _1, _2... 번호를 붙여 새로 생성.
+    """
     if opt.start_from:
-        print('Start training from id:{}'.format(opt.start_from))
+        print(f'Start training from id: {opt.start_from}')
         save_folder = os.path.join(opt.save_dir, opt.start_from)
-        assert os.path.exists(save_folder)
+        assert os.path.exists(save_folder), f'Folder not found: {save_folder}'
+        return save_folder
+
+    # 기본 save_dir이 없으면 만들기
+    os.makedirs(opt.save_dir, exist_ok=True)
+
+    base_folder = os.path.join(opt.save_dir, opt.id)
+
+    if os.path.exists(base_folder):
+        if overwrite:
+            print(f'Overwrite mode: Removing existing folder {base_folder}...')
+            shutil.rmtree(base_folder)
+            os.makedirs(base_folder)
+        else:
+            # 번호 붙여서 새 폴더 생성
+            idx = 1
+            while True:
+                new_folder = f"{base_folder}_{idx}"
+                if not os.path.exists(new_folder):
+                    print(f'Folder already exists, creating new folder: {new_folder}')
+                    base_folder = new_folder
+                    os.makedirs(base_folder)
+                    break
+                idx += 1
     else:
-        if not os.path.exists(opt.save_dir):
-            os.mkdir(opt.save_dir)
-        save_folder = os.path.join(opt.save_dir, opt.id)
-        if os.path.exists(save_folder):
-            # wait_flag = input('Warning! ID {} already exists, rename it? (Y/N) : '.format(opt.id))
-            raise AssertionError('ID already exists, folder {} exists'.format(save_folder))
-            
-            
-            # wait_flag = 'Y'
-            # if wait_flag in ['Y', 'y']:
-            #     opt.id = opt.id + '_v_{}'.format(time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime()))
-            #     save_folder = os.path.join(opt.save_dir, opt.id)
-            #     print('Rename opt.id as "{}".'.format(opt.id))
-            # else:
-            #     raise AssertionError('ID already exists, folder {} exists'.format(save_folder))
-        
-        
-        
-        print('Results folder "{}" does not exist, creating folder...'.format(save_folder))
-        os.mkdir(save_folder)
-        os.mkdir(os.path.join(save_folder, 'prediction'))
-    return save_folder
+        print(f'Creating results folder: {base_folder}')
+        os.makedirs(base_folder)
+
+    # 하위 prediction 폴더 생성
+    pred_folder = os.path.join(base_folder, 'prediction')
+    os.makedirs(pred_folder, exist_ok=True)
+
+    return base_folder
 
 
 def backup_envir(save_folder):
