@@ -26,7 +26,7 @@ from os.path import basename
 from ret_utils import load_clip_memory_bank
 import pandas as pd
 from misc.utils import set_seed
-from misc.utils import print_alert_message, build_floder, create_logger, backup_envir, print_opt, set_seed
+from misc.utils import print_alert_message, build_folder, create_logger, backup_envir, print_opt, set_seed
 def create_fake_test_caption_file(metadata_csv_path):
     out = {}
     df = pd.read_csv(metadata_csv_path)
@@ -244,6 +244,7 @@ if __name__ == '__main__':
         opt.test_video_feature_folder='data/anet/features/clipvitl14.pth/'
         opt.eval_caption_file='data/anet/captiondata/val_1.json'
         opt.eval_gt_file_for_caption=['data/anet/captiondata/val_1.json','data/anet/captiondata/val_2.json']
+        opt.eval_gt_file_for_grounding='data/anet/captiondata/grounding/val1_for_grounding.json'
 
     if opt.decoder_query_ablation:
         opt.num_queries=opt.decoder_query_num

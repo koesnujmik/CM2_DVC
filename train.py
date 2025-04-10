@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(cm2_dir, 'densevid_eval3/SODA'))
 from eval_utils_clip import evaluate
 import opts
 from tensorboardX import SummaryWriter
-from misc.utils import print_alert_message, build_floder, create_logger, backup_envir, print_opt, set_seed
+from misc.utils import print_alert_message, build_folder, create_logger, backup_envir, print_opt, set_seed
 from data.video_dataset import PropSeqDataset, collate_fn
 from cm2.cm2_ret_encdec_clip import build
 from collections import OrderedDict
@@ -43,7 +43,7 @@ def train(opt):
         except:
             opt.id = "debug"+str(hour)+str(minute)+str(second) #for debug
     print('Rename opt.id as "{}".'.format(opt.id))
-    save_folder = build_floder(opt)
+    save_folder = build_folder(opt)
     logger = create_logger(save_folder, 'train.log')
     tf_writer = SummaryWriter(os.path.join(save_folder, 'tf_summary'))
 
