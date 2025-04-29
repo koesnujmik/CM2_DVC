@@ -266,7 +266,7 @@ class SetCriterion_cl(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, matcher, weight_dict, losses, focal_alpha=0.25, focal_gamma=2, opt={}):
+    def __init__(self, num_classes, matcher_loc, matcher_sem, weight_dict, losses, focal_alpha=0.25, focal_gamma=2, opt={}):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -277,7 +277,9 @@ class SetCriterion_cl(nn.Module):
         """
         super().__init__()
         self.num_classes = num_classes
-        self.matcher = matcher
+        self.matcher = matcher_loc
+        self.matcher_loc = matcher_loc
+        self.matcher_sem = matcher_sem
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
@@ -417,8 +419,11 @@ class SetCriterion_cl(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-        last_indices = self.matcher(outputs_without_aux, targets)
-        outputs['matched_indices'] = last_indices
+        last_indices_l = self.matcher_loc(outputs_without_aux, targets)  # 위치 매칭
+        last_indices_s = self.matcher_sem(outputs_without_aux, targets)  # 의미 매칭
+        
+        outputs['matched_indices_loc'] = last_indices_l
+        outputs['matched_indices_sem'] = last_indices_s
 
         num_boxes = sum(len(t["labels"]) for t in targets)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
@@ -430,14 +435,17 @@ class SetCriterion_cl(nn.Module):
         losses = {}
         for loss in self.losses:
             kwargs = {}
-            losses.update(self.get_loss(loss, outputs, targets, last_indices, num_boxes, **kwargs))
+            losses.update(self.get_loss(loss, outputs, targets, last_indices_s, num_boxes, **kwargs))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
-            aux_indices = []
+            aux_indices_l = []
+            aux_indices_s = []
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                indices = self.matcher(aux_outputs, targets)
-                aux_indices.append(indices)
+                indices_l = self.matcher_loc(aux_outputs, targets)
+                indices_s = self.matcher_sem(aux_outputs, targets)
+                aux_indices_l.append(indices_l)
+                aux_indices_s.append(indices_s)
                 for loss in self.losses:
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
@@ -446,12 +454,12 @@ class SetCriterion_cl(nn.Module):
                     if loss == 'labels':
                         # Logging is enabled only for the last layer
                         kwargs['log'] = False
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices_s, num_boxes, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
-            return losses, last_indices, aux_indices
-        return losses, last_indices
+            return losses, (last_indices_l, last_indices_s), (aux_indices_l, aux_indices_s)
+        return losses, (last_indices_l, last_indices_s)
 
 
 class ContrastiveCriterion(nn.Module):
