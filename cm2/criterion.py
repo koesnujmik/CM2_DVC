@@ -6,6 +6,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+import numpy as np
 
 from misc.detr_utils import box_ops
 from misc.detr_utils.misc import (accuracy, get_world_size,
@@ -379,6 +380,19 @@ class SetCriterion_cl(nn.Module):
         losses['loss_self_iou'] = self_iou_split
 
         return losses
+    
+    def loss_concept(self, outputs, targets, indices, num_boxes, **kwargs):
+        # Compute concept loss from ConceptLoss module and return triplet and MIL losses.
+        P_v = outputs['pred_concept_prob']
+        video_concept_feats = outputs['pred_video_concept_feats']
+        concept_embeddings = outputs['concept_embeddings']
+        Y = outputs.get('concept_labels', None)
+        if Y is None:
+            return {'loss_tri': torch.tensor(0.0, device=P_v.device),
+                    'loss_mil': torch.tensor(0.0, device=P_v.device)}
+        concept_loss_fn = ConceptLoss(margin=0.5)
+        loss_total, loss_mil, loss_triplet = concept_loss_fn(P_v, Y, video_concept_feats, concept_embeddings)
+        return {'loss_tri': loss_triplet, 'loss_mil': loss_mil}
 
 
     def _get_src_permutation_idx(self, indices):
@@ -405,6 +419,7 @@ class SetCriterion_cl(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
+            'concept': self.loss_concept
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -567,3 +582,88 @@ class ContrastiveCriterion(nn.Module):
             
         return event_features, text_features, gt_labels, gt_event_num
 
+class ConceptLoss(nn.Module):
+    def __init__(self, margin=0.1, weight_mil=1.0, weight_triplet=1.0, n_samples=10):
+        """
+        margin: 트리플렛 손실에 적용할 margin 값.
+        weight_mil, weight_triplet: MIL와 트리플렛 손실에 대한 가중치.
+        """
+        super(ConceptLoss, self).__init__()
+        self.margin = margin
+        self.bce_loss = nn.BCELoss(reduction='mean')  # MIL 손실용
+        self.weight_mil = weight_mil
+        self.weight_triplet = weight_triplet
+        self.n_samples = n_samples  # N_s
+
+    def forward(self, P_v, Y, video_concept_feats, concept_embeddings):
+        """
+        Inputs:
+          - P_v: 비디오 수준 개념 확률, shape (N, N_C)
+          - Y: ground truth 멀티핫 레이블, shape (N, N_C) (dtype: float)
+          - video_concept_feats: 비디오 수준 개념 특징 f_v^c, shape (N, d)
+          - concept_embeddings: 학습 가능한 개념 임베딩 W_C, shape (N_C, d)
+          
+        Outputs:
+          - total_loss: MIL 손실과 트리플렛 손실의 가중 합
+          - loss_mil: MIL (BCE) 손실
+          - loss_triplet: 트리플렛(contrastive) 손실
+        """
+        # 1) Y를 Tensor화 + 올바른 디바이스/타입 지정
+        if not isinstance(Y, torch.Tensor):
+            Y = torch.as_tensor(Y)
+        # 이제 무조건 Tensor
+        Y = Y.to(P_v.device).float()
+
+        # 2) 만약 1차원이라면 [1, C] 형태로
+        if P_v.dim() == 1:
+            P_v = P_v.unsqueeze(0)   # (C,) → (1, C)
+        if Y.dim()   == 1:
+            Y   = Y.unsqueeze(0)     # (C,) → (1, C)
+
+        # 3) MIL 손실 (BCE)
+        loss_mil = self.bce_loss(P_v, Y)
+        
+        # Contrastive Loss (Triplet Loss) - 각 샘플마다 벡터화하여 계산
+        N, _ = Y.shape
+        loss_triplet = torch.tensor(0.0, device=P_v.device)
+        valid_count = 0
+
+        for i in range(N):
+            # 비디오 i의 특징 (d,)
+            v_feat = video_concept_feats[i]
+            v_feat_norm = F.normalize(v_feat, p=2, dim=0)
+
+            # (a) positive/negative 인덱스
+            pos_idx = (Y[i] == 1).nonzero(as_tuple=False).flatten()
+            neg_idx = (Y[i] == 0).nonzero(as_tuple=False).flatten()
+            if len(pos_idx)==0 or len(neg_idx)==0:
+                continue
+
+            # (b) NS 샘플링
+            if len(pos_idx) > self.n_samples:
+                perm = torch.randperm(len(pos_idx), device=pos_idx.device)[:self.n_samples]
+                pos_idx = pos_idx[perm]
+            if len(neg_idx) > self.n_samples:
+                perm = torch.randperm(len(neg_idx), device=neg_idx.device)[:self.n_samples]
+                neg_idx = neg_idx[perm]
+
+            # 해당하는 개념 임베딩 추출 및 정규화
+            pos_embeds = F.normalize(concept_embeddings[pos_idx], p=2, dim=1)  # (n_pos, d)
+            neg_embeds = F.normalize(concept_embeddings[neg_idx], p=2, dim=1)  # (n_neg, d)
+
+            # 각각의 긍정, 부정과의 코사인 유사도 계산
+            pos_sim = F.cosine_similarity(v_feat_norm.unsqueeze(0), pos_embeds, dim=1)  # (n_pos,)
+            neg_sim = F.cosine_similarity(v_feat_norm.unsqueeze(0), neg_embeds, dim=1)  # (n_neg,)
+
+            # 모든 긍정-부정 쌍에 대해 hinge loss 계산
+            # (n_neg, n_pos) 행렬: 각 부정-긍정 쌍에 대해 (neg - pos + margin)
+            diff = neg_sim.unsqueeze(1) - pos_sim.unsqueeze(0) + self.margin
+            loss_sample = torch.clamp(diff, min=0).mean()
+            loss_triplet += loss_sample
+            valid_count += 1
+        
+        if valid_count > 0:
+            loss_triplet = loss_triplet / valid_count
+        
+        total_loss = self.weight_mil * loss_mil + self.weight_triplet * loss_triplet
+        return total_loss, loss_mil, loss_triplet

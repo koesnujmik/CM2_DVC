@@ -360,6 +360,13 @@ class CM2(nn.Module):
                 return ret_src,ret_mask,ret_pos,value_vectors
             #######
     
+    def cross_modal_attention(self, F_v, F_s):
+        d = F_v.shape[-1]
+        scores = torch.bmm(F_v, F_s.transpose(1, 2)) / math.sqrt(d)
+        attn = F.softmax(scores, dim=-1)
+        F_out = torch.bmm(attn, F_s)
+        return F_out
+    
     def forward(self, dt, criterion,  contrastive_criterion,transformer_input_type, memory_bank, eval_mode=False,save_mode=False,sent_embedder=None,gt_bank=None):
 
         # N is batch , L is sequence length ( 100 fixed? for specific exam? ), C is hidden dim
@@ -381,49 +388,21 @@ class CM2(nn.Module):
             ret_src,ret_mask,ret_pos,retrieved_embed = self.window_ret(dt,memory_bank,eval_mode,sent_embedder,text_embed,gt_bank=gt_bank)
         
         srcs, masks, pos = self.base_encoder(vf, mask, duration)
-        if self.opt.combined_encoder:
-            srcs.append(ret_src)
-            masks.append(ret_mask)
-            pos.append(ret_pos)
-            
-            src_flatten, temporal_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten = self.transformer.prepare_encoder_inputs(
-                srcs, masks, pos)
-            memory = self.transformer.forward_encoder(src_flatten, temporal_shapes, level_start_index, valid_ratios,
-                                                    lvl_pos_embed_flatten, mask_flatten)
-            
-            
-            if self.opt.text_crossAttn:
-                text_feat=torch.transpose(ret_src,1,2)
-        else:
-            #visual encoder
-            src_flatten, temporal_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten = self.transformer.prepare_encoder_inputs(
-                srcs, masks, pos)
-            memory = self.transformer.forward_encoder(src_flatten, temporal_shapes, level_start_index, valid_ratios,
-                                                    lvl_pos_embed_flatten, mask_flatten)
-            
-            # if self.opt.text_crossAttn:
-            text_srcs=[]
-            text_masks=[]
-            text_pos=[]
-            text_feat_len = ret_src.shape[2]
-            for i in range(self.opt.num_feature_levels):
-                text_srcs.append(ret_src)
-                text_masks.append(ret_mask)
-                text_pos.append(ret_pos)
 
-            #text encoder
-            txt_src_flatten, txt_temporal_shapes, txt_level_start_index, txt_valid_ratios, txt_lvl_pos_embed_flatten, txt_mask_flatten = self.transformer.prepare_encoder_inputs(
-                text_srcs,text_masks,text_pos)
-            text_feat = self.transformer.forward_encoder(txt_src_flatten, txt_temporal_shapes, txt_level_start_index, txt_valid_ratios,
-                                                    txt_lvl_pos_embed_flatten, txt_mask_flatten)
-            text_feat = text_feat[:,:text_feat_len]
-            
-            if not self.opt.text_crossAttn:
-                result_feat=text_feat.repeat(1,memory.shape[1]//text_feat.shape[1],1)
-                if memory.shape[1]//text_feat.shape[1] != 0:
-                    result_feat= torch.cat((result_feat,text_feat[:,:memory.shape[1]%text_feat.shape[1]]),dim=1)
-                    result_feat = torch.cat((result_feat,memory),dim=2)                  
-                    memory=self.text_feat_proj(result_feat)
+        F_v = srcs[0].transpose(1, 2)
+        F_s = ret_src.transpose(1, 2)
+
+        if F_s is not None:
+            F_aggregated = self.cross_modal_attention(F_v, F_s)  # (N, T, d)
+        else:
+            F_aggregated = F_v
+
+        concept_detector = ConceptDetector(input_dim=F_aggregated.shape[2], num_concepts=600, embed_dim=F_aggregated.shape[2]).to(F_aggregated.device)
+        enhanced_feats, frame_concept_feats, video_concept_feats, p_t, P_v = concept_detector(F_aggregated)
+        
+        memory = enhanced_feats
+        src_flatten, temporal_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten = self.transformer.prepare_encoder_inputs(srcs, masks, pos)
+
         if not save_mode:
             two_stage, disable_iterative_refine, proposals, proposals_mask = decide_two_stage(transformer_input_type,
                                                                                                     dt, criterion)
@@ -436,14 +415,10 @@ class CM2(nn.Module):
                 proposals_mask = torch.ones(N, query_embed.shape[0], device=query_embed.device).bool()
                 init_reference, tgt, reference_points, query_embed = self.transformer.prepare_decoder_input_query(memory,
                                                                                                                 query_embed)
-            if self.opt.text_crossAttn:
-                hs, inter_references = self.transformer.forward_decoder(tgt, reference_points, memory, temporal_shapes,
+            hs, inter_references = self.transformer.forward_decoder(tgt, reference_points, memory, temporal_shapes,
                                                                     level_start_index, valid_ratios, query_embed,
-                                                                    mask_flatten, proposals_mask, disable_iterative_refine,text_feat)
-            else:
-                hs, inter_references = self.transformer.forward_decoder(tgt, reference_points, memory, temporal_shapes,
-                                                                        level_start_index, valid_ratios, query_embed,
-                                                                        mask_flatten, proposals_mask, disable_iterative_refine)
+                                                                    mask_flatten, proposals_mask, disable_iterative_refine)
+            
             text_embed=[[text_embed],[text_embed]]
             retrieved_embed=retrieved_embed.unsqueeze(0).repeat(2,1,1,1)
             
@@ -454,7 +429,12 @@ class CM2(nn.Module):
                     'valid_ratios': valid_ratios,
                     'proposals_mask': proposals_mask,
                     'text_embed':text_embed,
-                    'event_embed':retrieved_embed}
+                    'event_embed':retrieved_embed,
+                    'pred_concept_prob': P_v, # MIL 결과: (N, N_C)
+                    'pred_video_concept_feats': video_concept_feats, # 비디오 수준 개념 특징: (N, d)
+                    'concept_embeddings': concept_detector.W_C, # 학습 가능한 개념 임베딩: (N_C, d)
+                    'concept_labels': dt['concept_labels']
+                    }
             if eval_mode or self.opt.caption_loss_coef == 0:
                 out, loss = self.parallel_prediction_full(dt, criterion, contrastive_criterion, hs, query_embed,
                                                         init_reference, inter_references, others,
@@ -660,9 +640,25 @@ class CM2(nn.Module):
             all_out['event_embed'] = others['event_embed']
 
         out = {k: v[-1] for k, v in all_out.items()}
+        out.update({
+            'pred_concept_prob':        others['pred_concept_prob'],
+            'pred_video_concept_feats': others['pred_video_concept_feats'],
+            'concept_embeddings':       others['concept_embeddings'],
+            'concept_labels':           others['concept_labels'],
+        })
+
         if self.aux_loss:
-            ks, vs = list(zip(*(all_out.items())))
-            out['aux_outputs'] = [{ks[i]: vs[i][j] for i in range(len(ks))} for j in range(num_pred - 1)]
+            aux_outputs = []
+            for j in range(len(outputs_class) - 1):
+                aux_entry = {k: all_out[k][j] for k in all_out.keys()}
+                aux_entry.update({
+                    'pred_concept_prob':        others['pred_concept_prob'],
+                    'pred_video_concept_feats': others['pred_video_concept_feats'],
+                    'concept_embeddings':       others['concept_embeddings'],
+                    'concept_labels':           others['concept_labels'],
+                })
+                aux_outputs.append(aux_entry)
+            out['aux_outputs'] = aux_outputs
 
         loss, last_indices, aux_indices = criterion(out, dt['video_target'])
         
@@ -755,9 +751,27 @@ class CM2(nn.Module):
             'cl_match_mats': cl_match_mats}
         out = {k: v[-1] for k, v in all_out.items()}
 
+        out.update({
+            'pred_concept_prob':        others['pred_concept_prob'],
+            'pred_video_concept_feats': others['pred_video_concept_feats'],
+            'concept_embeddings':       others['concept_embeddings'],
+            'concept_labels':           others['concept_labels'],
+        })
+
         if self.aux_loss:
-            ks, vs = list(zip(*(all_out.items())))
-            out['aux_outputs'] = [{ks[i]: vs[i][j] for i in range(len(ks))} for j in range(num_pred - 1)]
+            aux_outputs = []
+            for j in range(len(outputs_class) - 1):  # num_pred-1
+                # 3) 시퀀스 출력 슬라이스
+                aux_entry = {k: all_out[k][j] for k in all_out.keys()}
+                # 4) 동일한 Concept 키들도 복사
+                aux_entry.update({
+                    'pred_concept_prob':        others['pred_concept_prob'],
+                    'pred_video_concept_feats': others['pred_video_concept_feats'],
+                    'concept_embeddings':       others['concept_embeddings'],
+                    'concept_labels':           others['concept_labels'],
+                })
+                aux_outputs.append(aux_entry)
+            out['aux_outputs'] = aux_outputs
             loss, last_indices, aux_indices = criterion(out, dt['video_target'])
             for l_id in range(hs.shape[0]):
                 hs_lid = hs[l_id]
@@ -1006,6 +1020,60 @@ class CM2(nn.Module):
 
         return cap_probs, seq
 
+class ConceptDetector(nn.Module):
+    """
+    Multiple Concept Detection Module for MCCL.
+    
+    입력:
+      video_feats: 비디오의 프레임 특징, shape (N, T, d)
+      
+    출력:
+      enhanced_feats: 개념 정보가 반영된 향상된 프레임 특징, (N, T, d)
+      frame_concept_feats: 각 프레임의 개념 특징 f_t^c, (N, T, d)
+      video_concept_feats: 비디오 수준의 개념 특징 f_v^c, (N, d)
+      p: 프레임별 개념 확률, (N, T, N_C)
+      P_v: 비디오 수준 개념 확률, (N, N_C)
+    """
+    def __init__(self, input_dim, num_concepts, embed_dim):
+        super(ConceptDetector, self).__init__()
+        self.num_concepts = num_concepts  # N_C: 선택된 상위 개념 수
+        self.input_dim = input_dim        # d: 입력 특징 차원
+        self.embed_dim = embed_dim        # 보통 d와 동일
+        
+        # 프레임 수준 개념 확률 예측 (shared FC layer)
+        self.fc = nn.Linear(input_dim, num_concepts)
+        
+        # 학습 가능한 개념 임베딩, W_C ∈ ℝ^(N_C × d)
+        self.W_C = nn.Parameter(torch.randn(num_concepts, embed_dim))
+        
+        # Temporal attention: 각 프레임에 대한 중요도를 산출하기 위한 linear layer
+        self.attn_fc = nn.Linear(input_dim, 1)
+        
+    def forward(self, video_feats):
+        """
+        video_feats: tensor of shape (N, T, d)
+        """
+        # (N, T, N_C): 각 프레임에 대해 N_C개 개념 확률 예측
+        p_t = torch.sigmoid(self.fc(video_feats))
+        
+        # (N, T, d): 각 프레임의 개념 특징 f_t^c = p_t * W_C
+        frame_concept_feats = torch.matmul(p_t, self.W_C)
+        
+        # Temporal attention: (N, T, 1) 스칼라 값을 산출한 후 softmax 적용하여 시간적 가중치
+        attn_scores = self.attn_fc(video_feats)  # (N, T, 1)
+        attn_weights = F.softmax(attn_scores, dim=1)  # (N, T, 1)
+        
+        # 비디오 수준 개념 확률 P_v ∈ ℝ^(N, N_C): 각 프레임의 p에 attention 가중치를 곱한 후 시간 차원 합산
+        P_v = torch.sum(attn_weights * p_t, dim=1)  # (N, N_C)
+        
+        # 비디오 수준 개념 특징 f_v^c = P_v * W_C, (N, d)
+        video_concept_feats = torch.matmul(P_v, self.W_C)
+        
+        # 원래 프레임 특징과 프레임별 개념 특징을 element-wise 덧셈하여 향상된 특징 생성
+        enhanced_feats = video_feats + frame_concept_feats
+        
+        return enhanced_feats, frame_concept_feats, video_concept_feats, p_t, P_v
+
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
 
@@ -1243,17 +1311,19 @@ def build(args):
         cost_giou  = 0.0,                   # gIoU cost 끔
         cost_alpha = args.cost_alpha,       # (unused)
         cost_gamma = args.cost_gamma,       # (unused)
-        cost_cl    = vars(args).get('set_cost_cl', 1.), # semantic cost만 켬
+        cost_cl    = args.set_cost_cl,      # semantic cost만 켬
         opt        = args,
     )
     
     weight_dict = {'loss_ce': args.cls_loss_coef,
                    'loss_bbox': args.bbox_loss_coef,
-                   'loss_giou': args.giou_loss_coef,
+                   'loss_giou': args.giou_loss_coef, # 4
                    'loss_counter': args.count_loss_coef,
-                   'loss_caption': args.caption_loss_coef,
+                   'loss_caption': args.caption_loss_coef, # 1
                    'contrastive_loss': args.contrastive_loss_start_coef,
-                   'loss_sem': 0.5
+                   'loss_sem': 0.5,
+                   'loss_tri': 1.0,
+                   'loss_mil': 1.0
                    }
     # TODO this is a hack
     if args.aux_loss:
@@ -1261,7 +1331,7 @@ def build(args):
         for i in range(args.dec_layers - 1):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
-    losses = ['labels', 'boxes', 'cardinality']
+    losses = ['labels', 'boxes', 'cardinality', 'concept']
 
     criterion = SetCriterion_cl(args.num_classes, matcher_loc, matcher_sem, weight_dict, losses, focal_alpha=args.focal_alpha,
                              focal_gamma=args.focal_gamma, opt=args)

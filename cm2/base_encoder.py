@@ -43,7 +43,7 @@ class BaseEncoder(nn.Module):
         else:
             self.input_proj = nn.ModuleList([
                 nn.Sequential(
-                    nn.Conv2d(vf_dim, hidden_dim, kernel_size=1),
+                    nn.Conv1d(vf_dim, hidden_dim, kernel_size=1),
                     nn.GroupNorm(32, hidden_dim),
                 )])
 

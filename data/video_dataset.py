@@ -15,8 +15,7 @@ from scipy.interpolate import interp1d
 def collate_fn(batch):
     batch_size = len(batch)
     feature_size = batch[0][0].shape[1]
-    feature_list, gt_timestamps_list, labels, caption_list, gt_raw_timestamp, raw_duration, raw_caption, key = zip(
-        *batch)
+    feature_list, gt_timestamps_list, labels, caption_list, gt_raw_timestamp, raw_duration, raw_caption, key, concept_labels, concept_set = zip(*batch)
 
     max_video_length = max([x.shape[0] for x in feature_list])
     max_caption_length = max(chain(*[[len(caption) for caption in captions] for captions in caption_list]))
@@ -143,6 +142,11 @@ def collate_fn(batch):
                 "length": caption_length,  # tensor,      (gt_all_event_num)
                 "mask": caption_mask,  # tensor,      (gt_all_event_num, cap_len, 1)
                 "raw": list(raw_caption),  # list,        (video_num, ~gt_event_num, ~~caption_len)
+            },
+        "concept":
+            {
+                "labels": concept_labels,    # 각 비디오의 concept 멀티핫 레이블 (tuple of arrays)
+                "vocab": concept_set         # 개념 집합, 모든 샘플에 동일한 값
             }
     }
     dt = {k1 + '_' + k2: v2 for k1, v1 in dt.items() for k2, v2 in v1.items()}
@@ -225,12 +229,25 @@ class EDVCdataset(Dataset):
 
 class PropSeqDataset(EDVCdataset):
 
-    def __init__(self, anno_file, feature_folder, translator_pickle, is_training, proposal_type,
-
-                 opt):
-        super(PropSeqDataset, self).__init__(anno_file,
-                                             feature_folder, translator_pickle, is_training, proposal_type,
-                                             opt)
+    def __init__(self, anno_file, feature_folder, translator_pickle, is_training, proposal_type, opt):
+        super(PropSeqDataset, self).__init__(anno_file, feature_folder, translator_pickle, is_training, proposal_type, opt)
+        #아래는 추가
+        self.concept_vocab_path = opt.concept_vocab_path   # 예: './data/concept_set_youcook2.json'
+        self.concept_labels_path = opt.concept_labels_path     # 예: './data/concept_labels_youcook2.json'
+        try:
+            with open(self.concept_vocab_path, 'r', encoding='utf-8') as f:
+                vocab_data = json.load(f)
+            self.concept_set = vocab_data['concept_set']
+        except Exception as e:
+            print("Error loading concept vocabulary:", e)
+            self.concept_set = []
+            
+        try:
+            with open(self.concept_labels_path, 'r', encoding='utf-8') as f:
+                self.concept_labels = json.load(f)
+        except Exception as e:
+            print("Error loading concept labels:", e)
+            self.concept_labels = {}
 
     def load_feats(self, key):
         vf_types = self.opt.visual_feature_type
@@ -300,7 +317,13 @@ class PropSeqDataset(EDVCdataset):
         # event_seq_idx = seq_gt_idx = np.expand_dims(gt_idx, 0)
         # lnt_scores = [1.] * len(lnt_featstamps)
 
-        return feats, gt_featstamps, action_labels, caption_label, gt_timestamps, duration, captions, key
+        if key in self.concept_labels:
+            concept_label = np.array(self.concept_labels[key])
+        else:
+            # 해당 비디오에 대해 개념 라벨이 없다면 모두 0인 벡터로 처리
+            concept_label = np.zeros(len(self.concept_set), dtype=int)
+
+        return feats, gt_featstamps, action_labels, caption_label, gt_timestamps, duration, captions, key, concept_label, self.concept_set
 
 
 def iou(interval_1, interval_2):
